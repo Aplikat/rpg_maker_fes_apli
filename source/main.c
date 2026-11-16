@@ -175,4 +175,33 @@ static void draw(int sel) {
     printf("Extdata ID: %lX\n", extdata_id);
     printf("Arriba/Abajo: elegir  A: instalar  X: recargar  START: salir\n\n");
     if (nworlds == 0) printf("(sin mundos)\n");
-    for (int i = 0; i
+    for (int i = 0; i < nworlds; i++)
+        printf("%s %s (%lu KB)\n", i == sel ? ">" : " ", worlds[i].name, worlds[i].size / 1024);
+    if (msg[0]) printf("\n%s", msg);
+}
+
+int main(void) {
+    gfxInitDefault();
+    consoleInit(GFX_TOP, NULL);
+    acInit();
+    httpcInit(0x100000);
+    fsInit();
+    load_config();
+    printf("Conectando...\n");
+    fetch_list();
+
+    int sel = 0;
+    draw(sel);
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 k = hidKeysDown();
+        if (k & KEY_START) break;
+        if ((k & KEY_DOWN) && sel + 1 < nworlds) { sel++; draw(sel); }
+        if ((k & KEY_UP) && sel > 0) { sel--; draw(sel); }
+        if (k & KEY_X) { consoleClear(); printf("Recargando...\n"); fetch_list(); if (sel >= nworlds) sel = 0; draw(sel); }
+        if ((k & KEY_A) && nworlds > 0) { install(&worlds[sel]); }
+        gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();
+    }
+    fsExit(); httpcExit(); acExit(); gfxExit();
+    return 0;
+}
