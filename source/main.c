@@ -13,7 +13,7 @@ typedef struct { char id[40]; char name[64]; u32 size; } World;
 static World worlds[MAX_WORLDS];
 static int nworlds = 0;
 static u32 extdata_id = DEFAULT_EXTDATA_ID;
-static char msg[512] = "";
+static char msg[768] = "";
 
 static void say(const char *fmt, ...) {
     char line[200];
@@ -23,18 +23,24 @@ static void say(const char *fmt, ...) {
     printf("%s\n", line);
 }
 
-static Result http_get(const char *url, u8 **out, u32 *outsize) {
+static Result http_get_once(const char *url, u8 **out, u32 *outsize) {
     httpcContext ctx;
     Result ret = httpcOpenContext(&ctx, HTTPC_METHOD_GET, url, 1);
-    if (R_FAILED(ret)) { say("OpenContext fallo"); return ret; }
+    if (R_FAILED(ret)) { say("OpenContext: %08lX", ret); return ret; }
     httpcSetSSLOpt(&ctx, SSLCOPT_DisableVerify);
-    httpcAddRequestHeaderField(&ctx, "User-Agent", "FesLoader/1.0");
+    httpcAddRequestHeaderField(&ctx, "User-Agent", "Mozilla/5.0 FesLoader/1.0");
+    httpcAddRequestHeaderField(&ctx, "Accept", "*/*");
     ret = httpcBeginRequest(&ctx);
-    if (R_FAILED(ret)) { say("BeginRequest fallo (conexion segura?)"); httpcCloseContext(&ctx); return ret; }
+    if (R_FAILED(ret)) { say("BeginRequest: %08lX", ret); httpcCloseContext(&ctx); return ret; }
 
     u32 status = 0;
-    httpcGetResponseStatusCode(&ctx, &status);
-    if (status != 200) { say("El servidor respondio HTTP %lu", status); httpcCloseContext(&ctx); return 0xE0000000u | status; }
+    ret = httpcGetResponseStatusCodeTimeout(&ctx, &status, 15000000000ULL);
+    if (R_FAILED(ret)) { say("Estado: %08lX", ret); httpcCloseContext(&ctx); return ret; }
+    if (status != 200) {
+        say("HTTP %lu", status);
+        httpcCloseContext(&ctx);
+        return 0xE0000000u | (status & 0xFFFF);
+    }
 
     u32 cap = 0x4000, size = 0, got = 0;
     u8 *buf = malloc(cap);
@@ -50,9 +56,22 @@ static Result http_get(const char *url, u8 **out, u32 *outsize) {
         }
     } while (ret == (Result)HTTPC_RESULTCODE_DOWNLOADPENDING);
     httpcCloseContext(&ctx);
-    if (R_FAILED(ret)) { say("Descarga fallo"); free(buf); return ret; }
+    if (R_FAILED(ret)) { say("Descarga: %08lX", ret); free(buf); return ret; }
     *out = buf; *outsize = size;
     return 0;
+}
+
+// Prueba HTTPS y, si falla, la misma direccion por HTTP simple.
+static Result http_get(const char *url, u8 **out, u32 *outsize) {
+    Result r = http_get_once(url, out, outsize);
+    if (R_SUCCEEDED(r)) return r;
+    if (strncmp(url, "https://", 8) == 0) {
+        char alt[260];
+        snprintf(alt, sizeof(alt), "http://%s", url + 8);
+        say("Reintento por HTTP simple...");
+        r = http_get_once(alt, out, outsize);
+    }
+    return r;
 }
 
 static void load_config(void) {
@@ -156,33 +175,4 @@ static void draw(int sel) {
     printf("Extdata ID: %lX\n", extdata_id);
     printf("Arriba/Abajo: elegir  A: instalar  X: recargar  START: salir\n\n");
     if (nworlds == 0) printf("(sin mundos)\n");
-    for (int i = 0; i < nworlds; i++)
-        printf("%s %s (%lu KB)\n", i == sel ? ">" : " ", worlds[i].name, worlds[i].size / 1024);
-    if (msg[0]) printf("\n%s", msg);
-}
-
-int main(void) {
-    gfxInitDefault();
-    consoleInit(GFX_TOP, NULL);
-    acInit();
-    httpcInit(0x100000);
-    fsInit();
-    load_config();
-    printf("Conectando...\n");
-    fetch_list();
-
-    int sel = 0;
-    draw(sel);
-    while (aptMainLoop()) {
-        hidScanInput();
-        u32 k = hidKeysDown();
-        if (k & KEY_START) break;
-        if ((k & KEY_DOWN) && sel + 1 < nworlds) { sel++; draw(sel); }
-        if ((k & KEY_UP) && sel > 0) { sel--; draw(sel); }
-        if (k & KEY_X) { consoleClear(); printf("Recargando...\n"); fetch_list(); if (sel >= nworlds) sel = 0; draw(sel); }
-        if ((k & KEY_A) && nworlds > 0) { install(&worlds[sel]); }
-        gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();
-    }
-    fsExit(); httpcExit(); acExit(); gfxExit();
-    return 0;
-}
+    for (int i = 0; i
