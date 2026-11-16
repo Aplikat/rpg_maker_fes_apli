@@ -75,4 +75,114 @@ static int next_free_slot(FS_Archive arc) {
     if (R_FAILED(FSUSER_OpenDirectory(&dir, arc, fsMakePath(PATH_ASCII, "/")))) return -1;
     FS_DirectoryEntry ent[16];
     u32 n = 0;
-    while (R_SUCCEEDED(FSDIR_Read(dir, &n, 16, ent)) &&
+    while (R_SUCCEEDED(FSDIR_Read(dir, &n, 16, ent)) && n > 0) {
+        for (u32 i = 0; i < n; i++) {
+            char name[32] = { 0 };
+            for (int k = 0; k < 31 && ent[i].name[k]; k++) name[k] = (char)ent[i].name[k];
+            int num;
+            if (sscanf(name, "game_%d.dat", &num) == 1 && num >= 0 && num < 100) used[num] = true;
+        }
+    }
+    FSDIR_Close(dir);
+    for (int i = 0; i < 100; i++) if (!used[i]) return i;
+    return -1;
+}
+
+static void fetch_list(void) {
+    msg[0] = 0;
+    nworlds = 0;
+    u32 wifi = 0;
+    if (R_SUCCEEDED(ACU_GetWifiStatus(&wifi)) && wifi == 0) { say("Sin Wi-Fi. Conectate y pulsa X."); return; }
+    char url[200];
+    snprintf(url, sizeof(url), "%s/api/list", BASE_URL);
+    u8 *data; u32 size;
+    Result r = http_get(url, &data, &size);
+    if (R_FAILED(r)) { say("Error al bajar la lista: %08lX", r); return; }
+    char *s = malloc(size + 1);
+    memcpy(s, data, size); s[size] = 0; free(data);
+    for (char *line = strtok(s, "\n"); line && nworlds < MAX_WORLDS; line = strtok(NULL, "\n")) {
+        World *w = &worlds[nworlds];
+        char *t1 = strchr(line, '\t'); if (!t1) continue; *t1++ = 0;
+        char *t2 = strchr(t1, '\t');   if (!t2) continue; *t2++ = 0;
+        snprintf(w->id, sizeof(w->id), "%s", line);
+        snprintf(w->name, sizeof(w->name), "%s", t1);
+        w->size = (u32)atoi(t2);
+        nworlds++;
+    }
+    free(s);
+    if (nworlds == 0) say("La lista llego vacia.");
+}
+
+static void install(const World *w) {
+    msg[0] = 0;
+    char url[200];
+    snprintf(url, sizeof(url), "%s/api/world/%s", BASE_URL, w->id);
+    say("Descargando %s...", w->name);
+    u8 *data; u32 size;
+    Result r = http_get(url, &data, &size);
+    if (R_FAILED(r)) { say("Error de descarga: %08lX", r); return; }
+
+    FS_Archive arc;
+    r = open_extdata(&arc);
+    if (R_FAILED(r)) {
+        say("No pude abrir el extdata (ID %lX): %08lX", extdata_id, r);
+        free(data); return;
+    }
+    int slot = next_free_slot(arc);
+    if (slot < 0) { say("No hay ranura libre."); FSUSER_CloseArchive(arc); free(data); return; }
+
+    char path[32];
+    snprintf(path, sizeof(path), "/game_%02d.dat", slot);
+    r = FSUSER_CreateFile(arc, fsMakePath(PATH_ASCII, path), 0, size);
+    if (R_FAILED(r)) { say("No pude crear %s: %08lX", path, r); FSUSER_CloseArchive(arc); free(data); return; }
+    Handle fh;
+    r = FSUSER_OpenFile(&fh, arc, fsMakePath(PATH_ASCII, path), FS_OPEN_WRITE, 0);
+    if (R_SUCCEEDED(r)) {
+        u32 written = 0;
+        r = FSFILE_Write(fh, &written, 0, data, size, FS_WRITE_FLUSH);
+        FSFILE_Close(fh);
+        if (R_SUCCEEDED(r) && written == size) say("Listo: instalado como %s", path);
+        else say("Error al escribir: %08lX (%lu/%lu)", r, written, size);
+    } else {
+        say("No pude abrir %s: %08lX", path, r);
+    }
+    FSUSER_CloseArchive(arc);
+    free(data);
+}
+
+static void draw(int sel) {
+    consoleClear();
+    printf("FesLoader - mundos de RPG Maker Fes\n");
+    printf("Extdata ID: %lX\n", extdata_id);
+    printf("Arriba/Abajo: elegir  A: instalar  X: recargar  START: salir\n\n");
+    if (nworlds == 0) printf("(sin mundos)\n");
+    for (int i = 0; i < nworlds; i++)
+        printf("%s %s (%lu KB)\n", i == sel ? ">" : " ", worlds[i].name, worlds[i].size / 1024);
+    if (msg[0]) printf("\n%s", msg);
+}
+
+int main(void) {
+    gfxInitDefault();
+    consoleInit(GFX_TOP, NULL);
+    acInit();
+    httpcInit(0x100000);
+    fsInit();
+    load_config();
+    printf("Conectando...\n");
+    fetch_list();
+
+    int sel = 0;
+    draw(sel);
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 k = hidKeysDown();
+        if (k & KEY_START) break;
+        if ((k & KEY_DOWN) && sel + 1 < nworlds) { sel++; draw(sel); }
+        if ((k & KEY_UP) && sel > 0) { sel--; draw(sel); }
+        if (k & KEY_X) { consoleClear(); printf("Recargando...\n"); fetch_list(); if (sel >= nworlds) sel = 0; draw(sel); }
+        if ((k & KEY_A) && nworlds > 0) { install(&worlds[sel]); }
+        gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();
+    }
+    fsExit(); httpcExit(); acExit(); gfxExit();
+    return 0;
+}
